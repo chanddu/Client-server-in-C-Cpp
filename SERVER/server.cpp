@@ -16,10 +16,18 @@
 #include <signal.h>
 #include<fstream>
 #include "crypt.cpp"
+#include "polarssl/dhm.h"
+#include "polarssl/entropy.h"
+#include "polarssl/ctr_drbg.h"
+#include "polarssl/bignum.h"
 
 #define PORT "8008"  // the port users will be connecting to
 
 #define BACKLOG 10	 // how many pending connections queue will hold
+
+int generate_key_serv(int fd,  unsigned char *key, size_t keylen);
+unsigned char key[32];
+
 using namespace std;
 
 void sigchld_handler(int s)
@@ -48,7 +56,7 @@ int main(void)
 	char s[INET6_ADDRSTRLEN];
 	int rv;
 
-	unsigned char key[32] = {23,234,1,3,6,7,8,9,45,54,65,5,12,13,14,15,16,17,18,34,35,36,37,38,57,58,59,60,62,63,64,66};
+	//unsigned char key[32] = {23,234,1,3,6,7,8,9,45,54,65,5,12,13,14,15,16,17,18,34,35,36,37,38,57,58,59,60,62,63,64,66};
 	char buf[1024];
 	bool exists = false;
 	
@@ -140,6 +148,7 @@ int main(void)
 			else
 				cout<<"error opening db file"<<endl;
 			if(exists){
+				int rv = generate_key_serv(new_fd,key,32);
 				while(1){
 					recv(new_fd, buf, 1023, 0);
 					string sen(buf);
@@ -168,5 +177,73 @@ int main(void)
 		close(new_fd);  // parent doesn't need this
 	}
 
+	return 0;
+}
+
+int generate_key_serv(int fd, unsigned char *key, size_t keylen)
+{
+	unsigned char buflen = 128;		/* Use 1024-bit P */
+	unsigned char buf[(int)buflen];
+  int rc;
+	entropy_context entropy;
+	ctr_drbg_context ctr_drbg;
+	dhm_context dhm;
+
+	/* Diffie-Hellman init */
+	dhm_init(&dhm);
+
+	/* Seeding the random number generator */
+	entropy_init(&entropy);
+	if (ctr_drbg_init(&ctr_drbg, entropy_func,
+				&entropy, NULL, 0) != 0) {
+		fprintf(stderr, "ERROR: ctr_drbg_init\n");
+		return -1;
+	}
+
+	/* Set DHM modulus and generator */
+	if (mpi_read_string(&dhm.P, 16,
+			POLARSSL_DHM_RFC2409_MODP_1024_P) != 0
+		|| mpi_read_string(&dhm.G, 16,
+			POLARSSL_DHM_RFC2409_MODP_1024_G) != 0) {
+		fprintf(stderr, "ERROR: mpi_read_string\n");
+		return -1;
+	}
+
+	dhm.len = mpi_size(&dhm.P);
+	cout<<dhm.len;
+
+	/* Setup the DH parameters & send to the client */
+	if (dhm_make_public(&dhm, (int)mpi_size(&dhm.P), buf, (int)buflen,
+				ctr_drbg_random, &ctr_drbg) != 0) {
+		fprintf(stderr, "ERROR: dhm_make_public\n");
+		return -1;
+	}
+	
+	if (send(fd,buf,buflen, 0)==-1) {
+		perror("key exchange send");
+	}
+
+	memset(buf, 0, buflen	);
+  if(recv(fd, buf, 1023, 0) == -1)
+		perror("key exchange recv");
+		
+	if (dhm_read_public(&dhm, buf, dhm.len) != 0) {
+		fprintf(stderr, "ERROR: dhm_read_public\n");
+		return -1;
+	}
+	
+	memset(buf, 0, buflen);
+	if (dhm_calc_secret(&dhm, buf,(size_t*) &buflen,
+			ctr_drbg_random, &ctr_drbg) != 0) {
+		fprintf(stderr, "ERROR: dhm_calc_secret\n");
+		return -1;
+	}
+
+	/* Copy the required keylength */
+	memcpy(key, buf, keylen);
+
+	dhm_free(&dhm);
+	ctr_drbg_free(&ctr_drbg);
+	entropy_free(&entropy);
 	return 0;
 }
